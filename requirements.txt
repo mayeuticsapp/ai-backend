@@ -13,3 +13,4 @@ uvicorn
 openai>=1.0.0
 requests
 gunicorn
+psycopg2-binary
