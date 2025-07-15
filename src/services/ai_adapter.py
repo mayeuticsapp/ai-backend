@@ -1,281 +1,223 @@
-"""
-AI Adapter Service - Handles different AI API providers
-Supports OpenAI, Anthropic, Google, and other providers through a unified interface
-"""
-
 import openai
 import requests
 import json
-from abc import ABC, abstractmethod
 from typing import Dict, List, Any, Optional
-import os
 
-class AIAdapter(ABC):
-    """Abstract base class for AI adapters"""
+class AIAdapter:
+    """Base class for AI adapters"""
     
-    def __init__(self, api_key: str, api_base_url: Optional[str] = None, model: str = "gpt-4", **kwargs):
+    def __init__(self, api_key: str, api_base_url: str, model: str, max_tokens: int = 1000, temperature: float = 0.7):
         self.api_key = api_key
         self.api_base_url = api_base_url
         self.model = model
-        self.max_tokens = kwargs.get('max_tokens', 1000)
-        self.temperature = kwargs.get('temperature', 0.7)
+        self.max_tokens = max_tokens
+        self.temperature = temperature
     
-    @abstractmethod
-    def send_message(self, messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:
-        """Send message to AI and return response"""
-        pass
+    def format_messages(self, system_prompt: str, user_message: str, conversation_history: List[Dict] = None) -> List[Dict]:
+        """Format messages for the AI API"""
+        messages = []
+        
+        # Add system prompt
+        if system_prompt:
+            messages.append({
+                "role": "system",
+                "content": system_prompt
+            })
+        
+        # Add conversation history
+        if conversation_history:
+            for msg in conversation_history[-5:]:  # Last 5 messages for context
+                if msg.get('sender_type') == 'ai' and msg.get('content'):
+                    messages.append({
+                        "role": "assistant",
+                        "content": msg['content']
+                    })
+                elif msg.get('sender_type') == 'user' and msg.get('content'):
+                    messages.append({
+                        "role": "user",
+                        "content": msg['content']
+                    })
+        
+        # Add current user message
+        messages.append({
+            "role": "user",
+            "content": user_message
+        })
+        
+        return messages
     
-    @abstractmethod
-    def format_messages(self, system_prompt: str, user_message: str, conversation_history: List[Dict] = None) -> List[Dict[str, str]]:
-        """Format messages for the specific API"""
-        pass
+    def send_message(self, messages: List[Dict]) -> Dict[str, Any]:
+        """Send message to AI and get response"""
+        raise NotImplementedError("Subclasses must implement send_message")
 
 class OpenAIAdapter(AIAdapter):
-    """Adapter for OpenAI API (GPT models)"""
+    """OpenAI API adapter"""
     
-    def __init__(self, api_key: str, api_base_url: Optional[str] = None, model: str = "gpt-4", **kwargs):
-        super().__init__(api_key, api_base_url, model, **kwargs)
+    def __init__(self, api_key: str, api_base_url: str = "https://api.openai.com/v1", model: str = "gpt-4", max_tokens: int = 1000, temperature: float = 0.7):
+        super().__init__(api_key, api_base_url, model, max_tokens, temperature)
         
         # Configure OpenAI client
         openai.api_key = self.api_key
-        if self.api_base_url:
-            openai.api_base = self.api_base_url
+        if api_base_url != "https://api.openai.com/v1":
+            openai.api_base = api_base_url
     
-    def send_message(self, messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:
+    def send_message(self, messages: List[Dict]) -> Dict[str, Any]:
         """Send message to OpenAI API"""
         try:
+            # Validate API key
+            if not self.api_key or self.api_key.strip() == "":
+                return {
+                    'success': False,
+                    'error': 'API key is missing or empty',
+                    'content': None
+                }
+            
+            # Make API call
             response = openai.ChatCompletion.create(
                 model=self.model,
                 messages=messages,
-                max_tokens=kwargs.get('max_tokens', self.max_tokens),
-                temperature=kwargs.get('temperature', self.temperature),
-                **kwargs
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                timeout=30
             )
+            
+            # Extract response
+            content = response.choices[0].message.content
+            usage = response.usage._asdict() if hasattr(response.usage, '_asdict') else dict(response.usage)
             
             return {
                 'success': True,
-                'content': response.choices[0].message.content,
-                'usage': {
-                    'prompt_tokens': response.usage.prompt_tokens,
-                    'completion_tokens': response.usage.completion_tokens,
-                    'total_tokens': response.usage.total_tokens
-                },
+                'content': content,
+                'usage': usage,
                 'model': response.model,
                 'provider': 'openai'
             }
+            
+        except openai.error.AuthenticationError as e:
+            return {
+                'success': False,
+                'error': f'Authentication failed: {str(e)}',
+                'content': None
+            }
+        except openai.error.RateLimitError as e:
+            return {
+                'success': False,
+                'error': f'Rate limit exceeded: {str(e)}',
+                'content': None
+            }
+        except openai.error.APIError as e:
+            return {
+                'success': False,
+                'error': f'OpenAI API error: {str(e)}',
+                'content': None
+            }
         except Exception as e:
             return {
                 'success': False,
-                'error': str(e),
-                'provider': 'openai'
+                'error': f'Unexpected error: {str(e)}',
+                'content': None
             }
-    
-    def format_messages(self, system_prompt: str, user_message: str, conversation_history: List[Dict] = None) -> List[Dict[str, str]]:
-        """Format messages for OpenAI API"""
-        messages = [{"role": "system", "content": system_prompt}]
-        
-        # Add conversation history
-        if conversation_history:
-            for msg in conversation_history[-10:]:  # Last 10 messages for context
-                if msg.get('sender_type') == 'user':
-                    messages.append({"role": "user", "content": msg['content']})
-                elif msg.get('sender_type') == 'ai':
-                    messages.append({"role": "assistant", "content": msg['content']})
-        
-        # Add current user message
-        messages.append({"role": "user", "content": user_message})
-        
-        return messages
 
-class AnthropicAdapter(AIAdapter):
-    """Adapter for Anthropic API (Claude models)"""
+class ManusAdapter(AIAdapter):
+    """Manus API adapter"""
     
-    def __init__(self, api_key: str, api_base_url: Optional[str] = None, model: str = "claude-3-sonnet-20240229", **kwargs):
-        super().__init__(api_key, api_base_url or "https://api.anthropic.com", model, **kwargs)
-    
-    def send_message(self, messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:
-        """Send message to Anthropic API"""
+    def send_message(self, messages: List[Dict]) -> Dict[str, Any]:
+        """Send message to Manus API"""
         try:
-            # Extract system message
-            system_message = ""
-            user_messages = []
+            # Validate API key
+            if not self.api_key or self.api_key.strip() == "":
+                return {
+                    'success': False,
+                    'error': 'API key is missing or empty',
+                    'content': None
+                }
             
-            for msg in messages:
-                if msg["role"] == "system":
-                    system_message = msg["content"]
-                else:
-                    user_messages.append(msg)
-            
+            # Prepare request
             headers = {
-                "Content-Type": "application/json",
-                "x-api-key": self.api_key,
-                "anthropic-version": "2023-06-01"
+                'Authorization': f'Bearer {self.api_key}',
+                'Content-Type': 'application/json'
             }
             
-            payload = {
-                "model": self.model,
-                "max_tokens": kwargs.get('max_tokens', self.max_tokens),
-                "temperature": kwargs.get('temperature', self.temperature),
-                "system": system_message,
-                "messages": user_messages
+            data = {
+                'model': self.model,
+                'messages': messages,
+                'max_tokens': self.max_tokens,
+                'temperature': self.temperature
             }
             
+            # Make API call
             response = requests.post(
-                f"{self.api_base_url}/v1/messages",
+                f"{self.api_base_url}/chat/completions",
                 headers=headers,
-                json=payload
+                json=data,
+                timeout=30
             )
             
             if response.status_code == 200:
-                data = response.json()
-                return {
-                    'success': True,
-                    'content': data['content'][0]['text'],
-                    'usage': {
-                        'prompt_tokens': data.get('usage', {}).get('input_tokens', 0),
-                        'completion_tokens': data.get('usage', {}).get('output_tokens', 0),
-                        'total_tokens': data.get('usage', {}).get('input_tokens', 0) + data.get('usage', {}).get('output_tokens', 0)
-                    },
-                    'model': data.get('model', self.model),
-                    'provider': 'anthropic'
-                }
-            else:
-                return {
-                    'success': False,
-                    'error': f"HTTP {response.status_code}: {response.text}",
-                    'provider': 'anthropic'
-                }
-                
-        except Exception as e:
-            return {
-                'success': False,
-                'error': str(e),
-                'provider': 'anthropic'
-            }
-    
-    def format_messages(self, system_prompt: str, user_message: str, conversation_history: List[Dict] = None) -> List[Dict[str, str]]:
-        """Format messages for Anthropic API"""
-        messages = [{"role": "system", "content": system_prompt}]
-        
-        # Add conversation history
-        if conversation_history:
-            for msg in conversation_history[-10:]:
-                if msg.get('sender_type') == 'user':
-                    messages.append({"role": "user", "content": msg['content']})
-                elif msg.get('sender_type') == 'ai':
-                    messages.append({"role": "assistant", "content": msg['content']})
-        
-        # Add current user message
-        messages.append({"role": "user", "content": user_message})
-        
-        return messages
-
-class GoogleAdapter(AIAdapter):
-    """Adapter for Google AI API (Gemini models)"""
-    
-    def __init__(self, api_key: str, api_base_url: Optional[str] = None, model: str = "gemini-pro", **kwargs):
-        super().__init__(api_key, api_base_url or "https://generativelanguage.googleapis.com", model, **kwargs)
-    
-    def send_message(self, messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:
-        """Send message to Google AI API"""
-        try:
-            # Convert messages to Google format
-            contents = []
-            system_instruction = ""
-            
-            for msg in messages:
-                if msg["role"] == "system":
-                    system_instruction = msg["content"]
-                elif msg["role"] == "user":
-                    contents.append({"role": "user", "parts": [{"text": msg["content"]}]})
-                elif msg["role"] == "assistant":
-                    contents.append({"role": "model", "parts": [{"text": msg["content"]}]})
-            
-            headers = {
-                "Content-Type": "application/json"
-            }
-            
-            payload = {
-                "contents": contents,
-                "generationConfig": {
-                    "maxOutputTokens": kwargs.get('max_tokens', self.max_tokens),
-                    "temperature": kwargs.get('temperature', self.temperature)
-                }
-            }
-            
-            if system_instruction:
-                payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
-            
-            url = f"{self.api_base_url}/v1beta/models/{self.model}:generateContent?key={self.api_key}"
-            
-            response = requests.post(url, headers=headers, json=payload)
-            
-            if response.status_code == 200:
-                data = response.json()
-                content = data['candidates'][0]['content']['parts'][0]['text']
+                result = response.json()
+                content = result['choices'][0]['message']['content']
                 
                 return {
                     'success': True,
                     'content': content,
-                    'usage': {
-                        'prompt_tokens': data.get('usageMetadata', {}).get('promptTokenCount', 0),
-                        'completion_tokens': data.get('usageMetadata', {}).get('candidatesTokenCount', 0),
-                        'total_tokens': data.get('usageMetadata', {}).get('totalTokenCount', 0)
-                    },
-                    'model': self.model,
-                    'provider': 'google'
+                    'usage': result.get('usage', {}),
+                    'model': result.get('model', self.model),
+                    'provider': 'manus'
                 }
             else:
                 return {
                     'success': False,
-                    'error': f"HTTP {response.status_code}: {response.text}",
-                    'provider': 'google'
+                    'error': f'API request failed with status {response.status_code}: {response.text}',
+                    'content': None
                 }
                 
+        except requests.exceptions.Timeout:
+            return {
+                'success': False,
+                'error': 'Request timeout',
+                'content': None
+            }
+        except requests.exceptions.RequestException as e:
+            return {
+                'success': False,
+                'error': f'Request error: {str(e)}',
+                'content': None
+            }
         except Exception as e:
             return {
                 'success': False,
-                'error': str(e),
-                'provider': 'google'
+                'error': f'Unexpected error: {str(e)}',
+                'content': None
             }
-    
-    def format_messages(self, system_prompt: str, user_message: str, conversation_history: List[Dict] = None) -> List[Dict[str, str]]:
-        """Format messages for Google AI API"""
-        messages = [{"role": "system", "content": system_prompt}]
-        
-        # Add conversation history
-        if conversation_history:
-            for msg in conversation_history[-10:]:
-                if msg.get('sender_type') == 'user':
-                    messages.append({"role": "user", "content": msg['content']})
-                elif msg.get('sender_type') == 'ai':
-                    messages.append({"role": "assistant", "content": msg['content']})
-        
-        # Add current user message
-        messages.append({"role": "user", "content": user_message})
-        
-        return messages
 
 class AIAdapterFactory:
-    """Factory class to create appropriate AI adapters"""
+    """Factory for creating AI adapters"""
     
-    ADAPTERS = {
-        'openai': OpenAIAdapter,
-        'anthropic': AnthropicAdapter,
-        'google': GoogleAdapter
-    }
-    
-    @classmethod
-    def create_adapter(cls, api_type: str, **kwargs) -> AIAdapter:
-        """Create an AI adapter based on the API type"""
-        if api_type not in cls.ADAPTERS:
-            raise ValueError(f"Unsupported API type: {api_type}. Supported types: {list(cls.ADAPTERS.keys())}")
+    @staticmethod
+    def create_adapter(api_type: str, api_key: str, api_base_url: str, model: str, max_tokens: int = 1000, temperature: float = 0.7) -> AIAdapter:
+        """Create appropriate AI adapter based on API type"""
         
-        adapter_class = cls.ADAPTERS[api_type]
-        return adapter_class(**kwargs)
+        if api_type.lower() == 'openai':
+            return OpenAIAdapter(
+                api_key=api_key,
+                api_base_url=api_base_url,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature
+            )
+        elif api_type.lower() == 'manus':
+            return ManusAdapter(
+                api_key=api_key,
+                api_base_url=api_base_url,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature
+            )
+        else:
+            raise ValueError(f"Unsupported API type: {api_type}")
     
-    @classmethod
-    def get_supported_types(cls) -> List[str]:
+    @staticmethod
+    def get_supported_types() -> List[str]:
         """Get list of supported API types"""
-        return list(cls.ADAPTERS.keys())
+        return ['openai', 'manus']
 

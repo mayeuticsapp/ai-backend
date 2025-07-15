@@ -1,6 +1,6 @@
 import os
 import sys
-# DON'T CHANGE THIS !!!
+# DON\'T CHANGE THIS !!!
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from flask import Flask, send_from_directory
@@ -14,8 +14,13 @@ from src.routes.conversations import conversations_bp
 app = Flask(__name__, static_folder=os.path.join(os.path.dirname(__file__), 'static'))
 app.config['SECRET_KEY'] = 'asdf#FGSgvasgf$5$WGT'
 
-# Enable CORS for all routes
-CORS(app)
+# Enable CORS for specific origins
+# Ho modificato questa riga per essere più esplicito sulle origini permesse
+CORS(app, resources={r"/api/*": {"origins": [
+    "https://ai-frontend-iyvt.onrender.com", # Il tuo frontend su Render
+    "http://localhost:5173", # Per lo sviluppo locale del frontend (se usi la porta predefinita di Vite )
+    # Aggiungi qui altre origini se necessario per lo sviluppo locale o altri ambienti
+]}})
 
 # Register blueprints
 app.register_blueprint(user_bp, url_prefix='/api')
@@ -39,7 +44,7 @@ with app.app_context():
         default_provider = AIProvider(
             name='OpenAI Default',
             api_type='openai',
-            api_base_url=os.getenv('OPENAI_API_BASE', 'https://api.openai.com/v1'),
+            api_base_url=os.getenv('OPENAI_API_BASE', 'https://api.openai.com/v1' ),
             api_key=os.getenv('OPENAI_API_KEY', ''),
             default_model='gpt-4',
             max_tokens=1000,
